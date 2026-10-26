@@ -1,0 +1,354 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Autonomous Vehicle Object Detector</title>
+
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
+
+<style>
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 20px;
+  font-family: Arial, sans-serif;
+  background: #101827;
+  color: white;
+}
+
+.container {
+  max-width: 900px;
+  margin: auto;
+}
+
+h1 { text-align: center; font-size: 27px; }
+
+.subtitle {
+  text-align: center;
+  color: #b9c5d6;
+  line-height: 1.5;
+}
+
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: center;
+  margin: 20px 0;
+}
+
+button, select {
+  padding: 12px 15px;
+  border: 0;
+  border-radius: 8px;
+  font-size: 15px;
+}
+
+button {
+  background: #22c55e;
+  color: #07150b;
+  font-weight: bold;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.secondary { background: #334155; color: white; }
+
+#status {
+  text-align: center;
+  color: #93c5fd;
+  margin: 15px 0;
+}
+
+.camera-box {
+  position: relative;
+  width: 100%;
+  overflow: hidden;
+  background: #000;
+  border-radius: 12px;
+  min-height: 220px;
+}
+
+video {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.panel {
+  background: #1e293b;
+  padding: 16px;
+  margin-top: 18px;
+  border-radius: 10px;
+}
+
+#results {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.tag {
+  padding: 8px 10px;
+  background: #334155;
+  border-radius: 7px;
+  font-size: 14px;
+}
+
+.note {
+  color: #cbd5e1;
+  font-size: 14px;
+  line-height: 1.6;
+}
+</style>
+</head>
+
+<body>
+<div class="container">
+  <h1>Autonomous Vehicle Object Detector</h1>
+
+  <p class="subtitle">
+    Real-time camera detection for people, vehicles, animals
+    and other supported objects.
+  </p>
+
+  <div class="controls">
+    <select id="cameraMode" aria-label="Camera selection">
+      <option value="environment">Phone rear camera</option>
+      <option value="user">Front camera / webcam</option>
+    </select>
+
+    <button id="startBtn">Start Detection</button>
+    <button id="stopBtn" class="secondary" disabled>Stop Camera</button>
+  </div>
+
+  <div id="status">Loading the AI model...</div>
+
+  <div class="camera-box">
+    <video id="video" autoplay playsinline muted></video>
+    <canvas id="canvas"></canvas>
+  </div>
+
+  <div class="panel">
+    <h3>Detected Objects</h3>
+    <div id="results">
+      <span class="tag">Waiting for camera...</span>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h3>Detection Information</h3>
+    <p class="note">
+      Bounding boxes show where the model believes objects are located.
+      Confidence values indicate the model's prediction score.
+      Results depend on lighting, camera quality, object size and distance.
+    </p>
+    <p class="note">
+      This initial model supports common pretrained classes.
+      It is not specifically trained to detect stones, gravel, tree trunks
+      or every possible animal and vehicle. Those require additional
+      training and testing.
+    </p>
+  </div>
+</div>
+
+<script>
+const video = document.getElementById("video");
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d");
+const statusText = document.getElementById("status");
+const results = document.getElementById("results");
+const startBtn = document.getElementById("startBtn");
+const stopBtn = document.getElementById("stopBtn");
+const cameraMode = document.getElementById("cameraMode");
+
+let model = null;
+let stream = null;
+let running = false;
+let detecting = false;
+let animationId = null;
+let lastDetection = 0;
+
+async function loadModel() {
+  try {
+    statusText.textContent = "Loading AI model. Please wait...";
+    model = await cocoSsd.load({ base: "lite_mobilenet_v2" });
+    statusText.textContent = "AI model ready. Press Start Detection.";
+    startBtn.disabled = false;
+  } catch (error) {
+    console.error(error);
+    statusText.textContent =
+      "Model loading failed. Check internet connection and reload.";
+  }
+}
+
+async function startCamera() {
+  if (!model) {
+    statusText.textContent = "AI model is still loading.";
+    return;
+  }
+
+  stopCamera();
+
+  try {
+    statusText.textContent = "Requesting camera permission...";
+
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: {
+        facingMode: { ideal: cameraMode.value },
+        width: { ideal: 640 },
+        height: { ideal: 480 }
+      }
+    });
+
+    video.srcObject = stream;
+    await video.play();
+
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+
+    running = true;
+    detecting = false;
+    lastDetection = 0;
+
+    startBtn.disabled = true;
+    stopBtn.disabled = false;
+    cameraMode.disabled = true;
+
+    statusText.textContent = "Camera running. Detecting objects...";
+    animationId = requestAnimationFrame(detectLoop);
+
+  } catch (error) {
+    console.error(error);
+    statusText.textContent =
+      "Cannot open camera. Allow camera permission and use HTTPS.";
+    stopCamera();
+  }
+}
+
+async function detectLoop(timestamp) {
+  if (!running) return;
+
+  animationId = requestAnimationFrame(detectLoop);
+
+  // Limit inference frequency to reduce phone workload.
+  if (detecting || timestamp - lastDetection < 180) return;
+  if (video.readyState < 2 || !video.videoWidth) return;
+
+  detecting = true;
+  lastDetection = timestamp;
+
+  try {
+    const predictions = await model.detect(video);
+
+    if (!running) return;
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    const visible = predictions.filter(p => p.score >= 0.40);
+
+    for (const p of visible) {
+      const [x, y, w, h] = p.bbox;
+
+      ctx.strokeStyle = "#22f5a0";
+      ctx.lineWidth = Math.max(2, canvas.width / 320);
+      ctx.strokeRect(x, y, w, h);
+
+      const label =
+        p.class + " " + (p.score * 100).toFixed(1) + "%";
+
+      ctx.font = "bold 15px Arial";
+      const textWidth = ctx.measureText(label).width;
+      const labelY = Math.max(0, y - 25);
+
+      ctx.fillStyle = "#22f5a0";
+      ctx.fillRect(x, labelY, textWidth + 12, 24);
+
+      ctx.fillStyle = "#07150b";
+      ctx.fillText(label, x + 6, labelY + 17);
+    }
+
+    results.innerHTML = "";
+
+    if (visible.length === 0) {
+      results.textContent = "No supported objects detected.";
+    } else {
+      visible.forEach(p => {
+        const tag = document.createElement("span");
+        tag.className = "tag";
+        tag.textContent =
+          p.class + " — " + (p.score * 100).toFixed(1) + "%";
+        results.appendChild(tag);
+      });
+    }
+
+    statusText.textContent =
+      "Live detection running · " + visible.length + " object(s) detected";
+
+  } catch (error) {
+    console.error(error);
+    statusText.textContent = "Detection error. See browser console.";
+  } finally {
+    detecting = false;
+  }
+}
+
+function stopCamera() {
+  running = false;
+
+  if (animationId !== null) {
+    cancelAnimationFrame(animationId);
+    animationId = null;
+  }
+
+  if (stream) {
+    stream.getTracks().forEach(track => track.stop());
+    stream = null;
+  }
+
+  video.pause();
+  video.srcObject = null;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  startBtn.disabled = !model;
+  stopBtn.disabled = true;
+  cameraMode.disabled = false;
+
+  results.textContent = "Camera stopped.";
+  statusText.textContent = model
+    ? "Camera stopped. Press Start Detection to restart."
+    : "Loading AI model...";
+}
+
+startBtn.disabled = true;
+stopBtn.disabled = true;
+
+startBtn.addEventListener("click", startCamera);
+stopBtn.addEventListener("click", stopCamera);
+
+if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+  loadModel();
+} else {
+  statusText.textContent =
+    "Camera API unavailable. Open this site using HTTPS in a supported browser.";
+}
+</script>
+</body>
+</html>
